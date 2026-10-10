@@ -27,8 +27,11 @@ import org.webrtc.EglBase;
 import org.webrtc.IceCandidate;
 import org.webrtc.MediaConstraints;
 import org.webrtc.MediaStream;
+import org.webrtc.MediaStreamTrack;
 import org.webrtc.PeerConnection;
 import org.webrtc.PeerConnectionFactory;
+import org.webrtc.RtpCapabilities;
+import org.webrtc.RtpTransceiver;
 import org.webrtc.ScreenCapturerAndroid;
 import org.webrtc.SdpObserver;
 import org.webrtc.SessionDescription;
@@ -315,8 +318,46 @@ public class ScreenMirrorService extends Service {
 
             peerConnection.addTrack(videoTrack, Collections.singletonList("stream"));
 
-            // ❌ Codec preference block সরিয়ে দেওয়া হয়েছে — Android ডিফল্ট codec (H264) পাঠাবে
-            // PC-তে av library-তে H264 আছে, তাই decode হবে
+            // Force VP8 for compatibility with aiortc 1.9.0. It supports VP8
+            // and only selected H.264 profiles, so relying on a device-default
+            // H.264 profile can produce "Failed to set remote video description send parameters".
+            RtpCapabilities videoCapabilities = factory.getRtpSenderCapabilities(
+                    MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO);
+            Integer vp8PayloadType = null;
+            for (RtpCapabilities.CodecCapability codec : videoCapabilities.codecs) {
+                if ("VP8".equalsIgnoreCase(codec.name)) {
+                    vp8PayloadType = codec.preferredPayloadType;
+                    break;
+                }
+            }
+            if (vp8PayloadType == null) {
+                throw new IllegalStateException("Android WebRTC build has no VP8 video codec");
+            }
+
+            // Include only VP8 plus its matching RTX codec, if available.
+            List<RtpCapabilities.CodecCapability> vp8Codecs = new ArrayList<>();
+            for (RtpCapabilities.CodecCapability codec : videoCapabilities.codecs) {
+                if ("VP8".equalsIgnoreCase(codec.name)) {
+                    vp8Codecs.add(codec);
+                } else if ("rtx".equalsIgnoreCase(codec.name)
+                        && codec.parameters != null
+                        && String.valueOf(vp8PayloadType).equals(codec.parameters.get("apt"))) {
+                    vp8Codecs.add(codec);
+                }
+            }
+
+            boolean codecPreferenceApplied = false;
+            for (RtpTransceiver transceiver : peerConnection.getTransceivers()) {
+                if (transceiver.getMediaType() == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO) {
+                    transceiver.setCodecPreferences(vp8Codecs);
+                    codecPreferenceApplied = true;
+                    break;
+                }
+            }
+            if (!codecPreferenceApplied) {
+                throw new IllegalStateException("Could not find video transceiver for VP8 preference");
+            }
+            Log.d(TAG, "VP8 codec preference set for PC aiortc receiver");
 
             videoTrack.setEnabled(true);
             screenCapturer.startCapture(720, 1280, 30);

@@ -7,9 +7,8 @@ import android.os.Build;
 import android.os.Bundle;
 
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AppCompatActivity;
 
-public class MirrorActivity extends AppCompatActivity {
+public class MirrorActivity extends Activity {
 
     private static final int REQ_PROJECTION = 7777;
 

@@ -11,11 +11,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- ✅ নতুন: Battery optimization exemption চাওয়ার জন্য -->
+    <!-- ✅ Battery optimization exemption চাওয়ার জন্য -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <!-- ✅ নতুন: CPU ঘুমাতে না দিতে -->
+    <!-- ✅ CPU ঘুমাতে না দিতে -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- ✅ নতুন: Phone restart হলে service আবার চালু হবে -->
+    <!-- ✅ Phone restart হলে service আবার চালু হবে -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
@@ -67,14 +67,14 @@
             </intent-filter>
         </activity>
 
-        <!-- ✅ এখানে stopWithTask="false" যোগ করা হয়েছে — app swipe করলেও service বাঁচবে -->
+        <!-- ✅ stopWithTask="false" — app swipe করলেও service বাঁচবে -->
         <service
             android:name=".ScreenMirrorService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection"
             android:stopWithTask="false" />
 
-        <!-- ✅ নতুন: Boot receiver — phone restart হলে service আবার চালু হবে -->
+        <!-- ✅ Boot receiver — phone restart হলে service আবার চালু হবে -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true"

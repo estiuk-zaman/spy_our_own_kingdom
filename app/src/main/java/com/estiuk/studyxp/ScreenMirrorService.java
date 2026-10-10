@@ -100,7 +100,6 @@ public class ScreenMirrorService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) {
-            // Service restarted by Android (process was killed) — keep alive
             if (initialized) return START_STICKY;
             return START_NOT_STICKY;
         }
@@ -113,7 +112,6 @@ public class ScreenMirrorService extends Service {
         }
 
         if (ACTION_PING.equals(action)) {
-            // Just keep alive; already running
             return START_STICKY;
         }
 
@@ -122,7 +120,6 @@ public class ScreenMirrorService extends Service {
             Intent resultData = intent.getParcelableExtra("resultData");
             startAsForeground();
 
-            // ✅ Heavy init on background thread so we don't ANR
             new Thread(() -> {
                 boolean ok = initOnce(resultCode, resultData);
                 if (ok) {
@@ -139,7 +136,6 @@ public class ScreenMirrorService extends Service {
     }
 
     @Override public void onTaskRemoved(Intent rootIntent) {
-        // ✅ App swipe করা হলেও service বাঁচিয়ে রাখো
         Log.d(TAG, "onTaskRemoved — service will keep running");
         super.onTaskRemoved(rootIntent);
     }

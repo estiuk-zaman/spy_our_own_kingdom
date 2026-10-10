@@ -4,11 +4,13 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.media.projection.MediaProjection;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.PowerManager;
 import android.util.Log;
 
 import androidx.annotation.Nullable;
@@ -44,11 +46,11 @@ public class ScreenMirrorService extends Service {
 
     public static final String ACTION_INIT     = "com.estiuk.studyxp.mirror.INIT";
     public static final String ACTION_STOP_SVC = "com.estiuk.studyxp.mirror.STOP_SVC";
+    public static final String ACTION_PING     = "com.estiuk.studyxp.mirror.PING";
 
     private static final String CHANNEL_ID      = "studyxp_mirror_sys_channel";
     private static final int    NOTIFICATION_ID = 9911;
 
-    // ⚠️ PC-র control.py / receiver.py এর ROOM_ID এর সাথে হুবহু মিলতে হবে
     private static final String ROOM_ID     = "studyxp-amar-gopon-room-2025";
     private static final String MQTT_BROKER = "tcp://broker.hivemq.com:1883";
 
@@ -71,42 +73,79 @@ public class ScreenMirrorService extends Service {
     private boolean        sessionActive = false;
     private boolean        initialized    = false;
 
+    private PowerManager.WakeLock wakeLock;
+
     @Override public void onCreate() {
         super.onCreate();
         createNotificationChannel();
+        acquireWakeLock();
+    }
+
+    private void acquireWakeLock() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        "StudyXP::MirrorWakeLock");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire();
+                Log.d(TAG, "WakeLock acquired");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "WakeLock failed", e);
+        }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) return START_STICKY;
+        if (intent == null) {
+            // Service restarted by Android (process was killed) — keep alive
+            if (initialized) return START_STICKY;
+            return START_NOT_STICKY;
+        }
 
         String action = intent.getAction();
+
         if (ACTION_STOP_SVC.equals(action)) {
             fullShutdown();
             return START_NOT_STICKY;
+        }
+
+        if (ACTION_PING.equals(action)) {
+            // Just keep alive; already running
+            return START_STICKY;
         }
 
         if (!initialized && ACTION_INIT.equals(action)) {
             int resultCode = intent.getIntExtra("resultCode", 0);
             Intent resultData = intent.getParcelableExtra("resultData");
             startAsForeground();
-            if (initOnce(resultCode, resultData)) {
-                initialized = true;
-                connectMqtt();
-                publishStatus("ready");
-            } else {
-                publishStatus("init-failed");
-                stopSelf();
-            }
+
+            // ✅ Heavy init on background thread so we don't ANR
+            new Thread(() -> {
+                boolean ok = initOnce(resultCode, resultData);
+                if (ok) {
+                    initialized = true;
+                    connectMqtt();
+                    publishStatus("ready");
+                } else {
+                    publishStatus("init-failed");
+                    stopSelf();
+                }
+            }, "MirrorInit").start();
         }
         return START_STICKY;
     }
 
     @Override public void onTaskRemoved(Intent rootIntent) {
+        // ✅ App swipe করা হলেও service বাঁচিয়ে রাখো
+        Log.d(TAG, "onTaskRemoved — service will keep running");
         super.onTaskRemoved(rootIntent);
     }
 
     @Override public void onDestroy() {
+        Log.d(TAG, "onDestroy called");
         fullShutdown();
         super.onDestroy();
     }
@@ -192,11 +231,12 @@ public class ScreenMirrorService extends Service {
             opts.setAutomaticReconnect(true);
             opts.setCleanSession(true);
             opts.setConnectionTimeout(30);
-            opts.setKeepAliveInterval(60);
+            opts.setKeepAliveInterval(30);
+            opts.setMaxInflight(20);
 
             mqttClient.setCallback(new MqttCallbackExtended() {
                 @Override public void connectComplete(boolean reconnect, String serverURI) {
-                    Log.d(TAG, "MQTT connected");
+                    Log.d(TAG, "MQTT connected (reconnect=" + reconnect + ")");
                     try {
                         mqttClient.subscribe(TOPIC_CMD, 1);
                         mqttClient.subscribe(TOPIC_ANSWER, 1);
@@ -227,12 +267,14 @@ public class ScreenMirrorService extends Service {
         try {
             if (mqttClient != null && mqttClient.isConnected()) {
                 mqttClient.publish(TOPIC_STATUS, new MqttMessage(s.getBytes()));
+                Log.d(TAG, "Status → " + s);
             }
         } catch (Exception ignored) {}
     }
 
     private void handleCommand(String cmd) {
         cmd = cmd.toLowerCase();
+        Log.d(TAG, "handleCommand: " + cmd + " (sessionActive=" + sessionActive + ")");
         if (cmd.equals("start") && !sessionActive) {
             startSession();
         } else if (cmd.equals("stop") && sessionActive) {
@@ -254,10 +296,7 @@ public class ScreenMirrorService extends Service {
 
             peerConnection = factory.createPeerConnection(cfg, new PeerConnection.Observer() {
                 @Override public void onIceCandidate(IceCandidate candidate) { sendLocalIce(candidate); }
-
-                // ✅ এই নতুন method-টা যোগ করা হয়েছে
                 @Override public void onIceCandidatesRemoved(IceCandidate[] candidates) {}
-
                 @Override public void onIceConnectionChange(PeerConnection.IceConnectionState state) {
                     Log.d(TAG, "ICE state: " + state);
                     if (state == PeerConnection.IceConnectionState.CONNECTED) {
@@ -391,6 +430,11 @@ public class ScreenMirrorService extends Service {
             if (mqttClient != null && mqttClient.isConnected()) {
                 try { mqttClient.disconnect(); } catch (Exception ignored) {}
                 mqttClient = null;
+            }
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+                wakeLock = null;
+                Log.d(TAG, "WakeLock released");
             }
         } catch (Exception e) { Log.e(TAG, "cleanup error", e); }
         initialized = false;

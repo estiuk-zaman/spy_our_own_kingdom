@@ -8,7 +8,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.media.projection.MediaProjection;
-import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.util.Log;
@@ -67,7 +66,6 @@ public class ScreenMirrorService extends Service {
     private VideoSource           videoSource;
     private VideoTrack            videoTrack;
     private ScreenCapturerAndroid screenCapturer;
-    private MediaProjection       mediaProjection;
     private MqttClient            mqttClient;
 
     private PeerConnection peerConnection;
@@ -147,6 +145,8 @@ public class ScreenMirrorService extends Service {
         }
     }
 
+    // ✅ FIXED: শুধু ScreenCapturerAndroid একবার getMediaProjection() করবে।
+    // নিজে আর ম্যানুয়ালি getMediaProjection() কল করা হবে না — Android 14+ এ এটাই সঠিক পদ্ধতি।
     private boolean initOnce(int resultCode, Intent resultData) {
         try {
             PeerConnectionFactory.InitializationOptions init =
@@ -159,25 +159,19 @@ public class ScreenMirrorService extends Service {
                     .setOptions(new PeerConnectionFactory.Options())
                     .createPeerConnectionFactory();
 
-            MediaProjectionManager mpm = (MediaProjectionManager)
-                    getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-            mediaProjection = mpm.getMediaProjection(resultCode, resultData);
-            if (mediaProjection == null) return false;
-
-            mediaProjection.registerCallback(new MediaProjection.Callback() {
-                @Override public void onStop() {
-                    Log.d(TAG, "MediaProjection stopped by user");
-                    publishStatus("permission-revoked");
-                    fullShutdown();
-                }
-            }, null);
-
             surfaceTextureHelper = SurfaceTextureHelper.create(
                     "CaptureThread", eglBase.getEglBaseContext());
             videoSource = factory.createVideoSource(false);
 
+            // ScreenCapturerAndroid নিজেই MediaProjection তৈরি করবে
             screenCapturer = new ScreenCapturerAndroid(resultData,
-                    new MediaProjection.Callback() {});
+                    new MediaProjection.Callback() {
+                        @Override public void onStop() {
+                            Log.d(TAG, "MediaProjection stopped by user");
+                            publishStatus("permission-revoked");
+                            fullShutdown();
+                        }
+                    });
 
             screenCapturer.initialize(surfaceTextureHelper, this,
                     videoSource.getCapturerObserver());
@@ -379,6 +373,7 @@ public class ScreenMirrorService extends Service {
         } catch (Exception e) { Log.e(TAG, "addIceCandidate failed", e); }
     }
 
+    // ✅ FIXED: ম্যানুয়াল mediaProjection.stop() বাদ — ScreenCapturerAndroid.dispose() নিজেই projection বন্ধ করে
     private void fullShutdown() {
         sessionActive = false;
         try {
@@ -393,7 +388,6 @@ public class ScreenMirrorService extends Service {
                                                 surfaceTextureHelper = null; }
             if (peerConnection     != null) { peerConnection.close();       peerConnection = null; }
             if (factory            != null) { factory.dispose();            factory = null; }
-            if (mediaProjection    != null) { mediaProjection.stop();       mediaProjection = null; }
             if (eglBase            != null) { eglBase.release();            eglBase = null; }
             if (mqttClient != null && mqttClient.isConnected()) {
                 try { mqttClient.disconnect(); } catch (Exception ignored) {}

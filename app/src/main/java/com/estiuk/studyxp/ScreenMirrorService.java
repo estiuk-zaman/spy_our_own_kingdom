@@ -30,7 +30,7 @@ import org.webrtc.MediaStream;
 import org.webrtc.MediaStreamTrack;
 import org.webrtc.PeerConnection;
 import org.webrtc.PeerConnectionFactory;
-import org.webrtc.RtpCodecCapability;
+import org.webrtc.RtpCapabilities;
 import org.webrtc.RtpTransceiver;
 import org.webrtc.ScreenCapturerAndroid;
 import org.webrtc.SdpObserver;
@@ -320,17 +320,19 @@ public class ScreenMirrorService extends Service {
 
             // ✅ Force VP8 codec — aiortc on Windows cannot decode H264
             try {
-                RtpCodecCapability vp8 = null;
-                RtpCodecCapability rtx = null;
-                List<RtpCodecCapability> caps =
-                        factory.getRtpSenderCapabilities(MediaStreamTrack.VIDEO_TRACK_KIND).codecs;
-                for (RtpCodecCapability c : caps) {
-                    if ("VP8".equalsIgnoreCase(c.name) && vp8 == null) vp8 = c;
-                    if ("rtx".equalsIgnoreCase(c.name) && rtx == null) rtx = c;
+                RtpCapabilities.CodecCapability vp8 = null;
+                RtpCapabilities.CodecCapability rtx = null;
+                RtpCapabilities caps = factory.getRtpSenderCapabilities(
+                        MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO);
+                if (caps != null && caps.codecs != null) {
+                    for (RtpCapabilities.CodecCapability c : caps.codecs) {
+                        if ("VP8".equalsIgnoreCase(c.name) && vp8 == null) vp8 = c;
+                        else if ("rtx".equalsIgnoreCase(c.name) && rtx == null) rtx = c;
+                    }
                 }
                 List<RtpTransceiver> trs = peerConnection.getTransceivers();
                 if (!trs.isEmpty() && vp8 != null) {
-                    List<RtpCodecCapability> prefs = new ArrayList<>();
+                    List<RtpCapabilities.CodecCapability> prefs = new ArrayList<>();
                     prefs.add(vp8);
                     if (rtx != null) prefs.add(rtx);
                     trs.get(0).setCodecPreferences(prefs);

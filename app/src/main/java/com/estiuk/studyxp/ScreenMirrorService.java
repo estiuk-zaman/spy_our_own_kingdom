@@ -144,7 +144,6 @@ public class ScreenMirrorService extends Service {
         }
     }
 
-    // ✅ FIXED for Android 14+: শুধু ScreenCapturerAndroid-ই getMediaProjection() কল করবে।
     private boolean initOnce(int resultCode, Intent resultData) {
         try {
             PeerConnectionFactory.InitializationOptions init =
@@ -161,7 +160,6 @@ public class ScreenMirrorService extends Service {
                     "CaptureThread", eglBase.getEglBaseContext());
             videoSource = factory.createVideoSource(false);
 
-            // ScreenCapturerAndroid নিজেই MediaProjection তৈরি করবে — আমরা আর ম্যানুয়ালি কল করব না
             screenCapturer = new ScreenCapturerAndroid(resultData,
                     new MediaProjection.Callback() {
                         @Override public void onStop() {
@@ -256,6 +254,10 @@ public class ScreenMirrorService extends Service {
 
             peerConnection = factory.createPeerConnection(cfg, new PeerConnection.Observer() {
                 @Override public void onIceCandidate(IceCandidate candidate) { sendLocalIce(candidate); }
+
+                // ✅ এই নতুন method-টা যোগ করা হয়েছে
+                @Override public void onIceCandidatesRemoved(IceCandidate[] candidates) {}
+
                 @Override public void onIceConnectionChange(PeerConnection.IceConnectionState state) {
                     Log.d(TAG, "ICE state: " + state);
                     if (state == PeerConnection.IceConnectionState.CONNECTED) {
@@ -371,7 +373,6 @@ public class ScreenMirrorService extends Service {
         } catch (Exception e) { Log.e(TAG, "addIceCandidate failed", e); }
     }
 
-    // ✅ ম্যানুয়াল mediaProjection.stop() বাদ — screenCapturer.dispose() নিজেই করে দেয়
     private void fullShutdown() {
         sessionActive = false;
         try {

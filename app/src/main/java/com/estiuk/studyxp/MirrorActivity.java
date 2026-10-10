@@ -40,7 +40,6 @@ public class MirrorActivity extends Activity {
             i.setData(Uri.parse("package:" + getPackageName()));
             startActivity(i);
         } catch (Exception ignored) {
-            // Some devices block this — no problem, user can set it manually
         }
     }
 

@@ -9,8 +9,12 @@ android {
         targetSdk 35
         versionCode 6
         versionName '4.1'
+        multiDexEnabled true
     }
-    // Fixed debug key: every build is signed the same way, so new APKs install as updates (data is kept).
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
     signingConfigs {
         debug {
             storeFile file('istii-debug.jks')
@@ -25,4 +29,20 @@ android {
             debuggable false
         }
     }
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/*.kotlin_module']
+        }
+    }
+}
+
+dependencies {
+    // WebRTC (maintained Android build)
+    implementation 'io.github.webrtc-sdk:android:125.6422.07'
+
+    // MQTT signaling
+    implementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5'
+
+    // MultiDex (minSdk 21 এর জন্য দরকার)
+    implementation 'androidx.multidex:multidex:2.0.1'
 }

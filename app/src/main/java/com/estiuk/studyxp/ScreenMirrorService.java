@@ -537,9 +537,6 @@ public class ScreenMirrorService extends Service {
             if (screenCapturer != null) {
                 try {
                     screenCapturer.stopCapture();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    Log.w(TAG, "Interrupted while stopping screen capture", e);
                 } catch (Exception e) {
                     Log.w(TAG, "Screen capture was not running", e);
                 }
@@ -681,10 +678,9 @@ public class ScreenMirrorService extends Service {
             if (screenCapturer != null) {
                 try {
                     screenCapturer.stopCapture();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    Log.w(TAG, "Interrupted while stopping screen capture", e);
-                } catch (Exception ignored) { }
+                } catch (Exception e) {
+                    Log.w(TAG, "Unable to stop screen capture cleanly", e);
+                }
                 try { screenCapturer.dispose(); } catch (Exception ignored) { }
                 screenCapturer = null;
             }

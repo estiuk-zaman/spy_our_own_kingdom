@@ -27,11 +27,8 @@ import org.webrtc.EglBase;
 import org.webrtc.IceCandidate;
 import org.webrtc.MediaConstraints;
 import org.webrtc.MediaStream;
-import org.webrtc.MediaStreamTrack;
 import org.webrtc.PeerConnection;
 import org.webrtc.PeerConnectionFactory;
-import org.webrtc.RtpCapabilities;
-import org.webrtc.RtpTransceiver;
 import org.webrtc.ScreenCapturerAndroid;
 import org.webrtc.SdpObserver;
 import org.webrtc.SessionDescription;
@@ -318,31 +315,8 @@ public class ScreenMirrorService extends Service {
 
             peerConnection.addTrack(videoTrack, Collections.singletonList("stream"));
 
-            // ✅ Force VP8 codec — aiortc on Windows cannot decode H264
-            try {
-                RtpCapabilities.CodecCapability vp8 = null;
-                RtpCapabilities.CodecCapability rtx = null;
-                RtpCapabilities caps = factory.getRtpSenderCapabilities(
-                        MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO);
-                if (caps != null && caps.codecs != null) {
-                    for (RtpCapabilities.CodecCapability c : caps.codecs) {
-                        if ("VP8".equalsIgnoreCase(c.name) && vp8 == null) vp8 = c;
-                        else if ("rtx".equalsIgnoreCase(c.name) && rtx == null) rtx = c;
-                    }
-                }
-                List<RtpTransceiver> trs = peerConnection.getTransceivers();
-                if (!trs.isEmpty() && vp8 != null) {
-                    List<RtpCapabilities.CodecCapability> prefs = new ArrayList<>();
-                    prefs.add(vp8);
-                    if (rtx != null) prefs.add(rtx);
-                    trs.get(0).setCodecPreferences(prefs);
-                    Log.d(TAG, "✅ Codec preference set: VP8 only");
-                } else {
-                    Log.w(TAG, "⚠ VP8 not found in caps or no transceivers");
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "setCodecPreferences failed", e);
-            }
+            // ❌ Codec preference block সরিয়ে দেওয়া হয়েছে — Android ডিফল্ট codec (H264) পাঠাবে
+            // PC-তে av library-তে H264 আছে, তাই decode হবে
 
             videoTrack.setEnabled(true);
             screenCapturer.startCapture(720, 1280, 30);
@@ -397,7 +371,7 @@ public class ScreenMirrorService extends Service {
             obj.put("sdp", sdp.description);
             obj.put("type", sdp.type.canonicalForm());
             mqttClient.publish(TOPIC_OFFER, new MqttMessage(obj.toString().getBytes()));
-            Log.d(TAG, "Offer sent (VP8)");
+            Log.d(TAG, "Offer sent");
         } catch (Exception e) { Log.e(TAG, "sendOffer failed", e); }
     }
 

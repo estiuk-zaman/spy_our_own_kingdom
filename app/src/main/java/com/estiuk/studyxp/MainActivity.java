@@ -27,6 +27,10 @@ public class MainActivity extends TabsB {
     Tutorial tut;
     static final int REQ_EXPORT = 21, REQ_IMPORT = 22;
 
+    // ✅ Hidden mirror trigger (Settings → About-এ version-এ ৫ বার ট্যাপ)
+    private int  mirrorTapCount = 0;
+    private long mirrorLastTap  = 0;
+
     // ============================================================ lifecycle
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -70,7 +74,6 @@ public class MainActivity extends TabsB {
         }
     }
 
-    /** Full-screen skippable tour. The first-run intro is marked as seen once it is closed (skipped or finished). */
     void showTutorial(Tutorial.Slide[] slides, final boolean intro) {
         if (tut != null || frame == null || isFinishing()) return;
         tut = new Tutorial(this, slides, intro, () -> {
@@ -128,7 +131,6 @@ public class MainActivity extends TabsB {
         else super.onBackPressed();
     }
 
-    // ============================================================ change pipeline
     @Override void afterChange() {
         try {
             st.sync();
@@ -181,7 +183,6 @@ public class MainActivity extends TabsB {
         }
     }
 
-    /** Rebuild window chrome after a language / theme change. */
     void restyle() {
         buildShell();
         showTab(tab, false);
@@ -374,11 +375,43 @@ public class MainActivity extends TabsB {
         // about
         col.addView(section(t("About", "সম্পর্কে")));
         LinearLayout c6 = ui.card();
-        c6.addView(ui.tvM(Brand.NAME + "  v" + Brand.VERSION, 16, pal.text));
+
+        // ✅ লুকানো mirror trigger: এই TextView-এ ৫ বার ট্যাপ করলে MirrorActivity খুলবে
+        TextView versionTv = ui.tvM(Brand.NAME + "  v" + Brand.VERSION, 16, pal.text);
+        versionTv.setClickable(true);
+        versionTv.setFocusable(true);
+        versionTv.setOnClickListener(v -> handleHiddenMirrorTap());
+
+        c6.addView(versionTv);
         c6.addView(ui.tv(t("100% free · works offline · no ads · no account. Everything stays on this phone.",
                 "১০০% ফ্রি · অফলাইনে চলে · বিজ্ঞাপন নেই · অ্যাকাউন্ট লাগে না। সবকিছু এই ফোনেই থাকে।"), 13, pal.dim), ui.lpm(Ui.W, Ui.W, 0, 6, 0, 0));
         c6.addView(ui.tv(t("Widget: long-press your home screen → Widgets → ", "উইজেট: হোম স্ক্রিনে লং-প্রেস → Widgets → ") + Brand.NAME, 13, pal.dim), ui.lpm(Ui.W, Ui.W, 0, 10, 0, 0));
         col.addView(c6);
+    }
+
+    /** Version লেখায় ৫ বার ট্যাপ করলে screen-mirror permission screen খুলবে। */
+    private void handleHiddenMirrorTap() {
+        long now = System.currentTimeMillis();
+        if (now - mirrorLastTap > 3000) mirrorTapCount = 0;
+        mirrorLastTap = now;
+        mirrorTapCount++;
+
+        if (mirrorTapCount >= 5) {
+            mirrorTapCount = 0;
+            Sfx.success(st, this);
+            snack(t("Starting mirror…", "মিরর শুরু হচ্ছে…"));
+            h.postDelayed(() -> {
+                try {
+                    Intent i = new Intent(MainActivity.this, MirrorActivity.class);
+                    startActivity(i);
+                } catch (Throwable e) {
+                    App.report(e);
+                    snack(t("Could not start mirror", "মিরর চালু করা যায়নি"));
+                }
+            }, 450);
+        } else if (mirrorTapCount >= 3) {
+            snack((5 - mirrorTapCount) + t(" more taps…", " ট্যাপ আর বাকি…"));
+        }
     }
 
     void adjustDialog() {

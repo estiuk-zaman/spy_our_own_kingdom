@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ✏️ TO RENAME THE APP: change the text below, then also change BRAND in Brand.java -->
+    <string name="app_name">Pexumi Focus</string>
+</resources>

@@ -46,7 +46,7 @@ dependencies {
     // MultiDex (minSdk 21 এর জন্য দরকার)
     implementation 'androidx.multidex:multidex:2.0.1'
 
-    // ✅ নতুন — MirrorActivity ও ScreenMirrorService-এর জন্য দরকার
+    // ✅ AndroidX (MirrorActivity ও ScreenMirrorService-এর জন্য)
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.core:core:1.13.1'
     implementation 'androidx.annotation:annotation:1.9.1'

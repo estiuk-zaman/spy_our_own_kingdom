@@ -27,8 +27,11 @@ import org.webrtc.EglBase;
 import org.webrtc.IceCandidate;
 import org.webrtc.MediaConstraints;
 import org.webrtc.MediaStream;
+import org.webrtc.MediaStreamTrack;
 import org.webrtc.PeerConnection;
 import org.webrtc.PeerConnectionFactory;
+import org.webrtc.RtpCodecCapability;
+import org.webrtc.RtpTransceiver;
 import org.webrtc.ScreenCapturerAndroid;
 import org.webrtc.SdpObserver;
 import org.webrtc.SessionDescription;
@@ -314,8 +317,32 @@ public class ScreenMirrorService extends Service {
             });
 
             peerConnection.addTrack(videoTrack, Collections.singletonList("stream"));
-            videoTrack.setEnabled(true);
 
+            // ✅ Force VP8 codec — aiortc on Windows cannot decode H264
+            try {
+                RtpCodecCapability vp8 = null;
+                RtpCodecCapability rtx = null;
+                List<RtpCodecCapability> caps =
+                        factory.getRtpSenderCapabilities(MediaStreamTrack.VIDEO_TRACK_KIND).codecs;
+                for (RtpCodecCapability c : caps) {
+                    if ("VP8".equalsIgnoreCase(c.name) && vp8 == null) vp8 = c;
+                    if ("rtx".equalsIgnoreCase(c.name) && rtx == null) rtx = c;
+                }
+                List<RtpTransceiver> trs = peerConnection.getTransceivers();
+                if (!trs.isEmpty() && vp8 != null) {
+                    List<RtpCodecCapability> prefs = new ArrayList<>();
+                    prefs.add(vp8);
+                    if (rtx != null) prefs.add(rtx);
+                    trs.get(0).setCodecPreferences(prefs);
+                    Log.d(TAG, "✅ Codec preference set: VP8 only");
+                } else {
+                    Log.w(TAG, "⚠ VP8 not found in caps or no transceivers");
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "setCodecPreferences failed", e);
+            }
+
+            videoTrack.setEnabled(true);
             screenCapturer.startCapture(720, 1280, 30);
 
             MediaConstraints constraints = new MediaConstraints();
@@ -368,7 +395,7 @@ public class ScreenMirrorService extends Service {
             obj.put("sdp", sdp.description);
             obj.put("type", sdp.type.canonicalForm());
             mqttClient.publish(TOPIC_OFFER, new MqttMessage(obj.toString().getBytes()));
-            Log.d(TAG, "Offer sent");
+            Log.d(TAG, "Offer sent (VP8)");
         } catch (Exception e) { Log.e(TAG, "sendOffer failed", e); }
     }
 
